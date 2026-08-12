@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/vrischmann/envconfig"
+	"github.com/spf13/pflag"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -43,38 +43,25 @@ func (g *GroupVersionKindProvider) Unmarshal(s string) error {
 	return nil
 }
 
-// Config holds the configuration for the search-operator
-type Config struct {
-	KCP struct {
-		// Kubeconfig is the path to the kcp kubeconfig file
-		Kubeconfig string `mapstructure:"kcp-kubeconfig" envconfig:"default=/api-kubeconfig/kubeconfig"`
-	} `mapstructure:",squash"`
-
-	SearchableResource struct {
-		Resources []GroupVersionKindProvider `mapstructure:"resources" envconfig:"default={core.platform-mesh.io;v1alpha1;Account;platform-mesh-system}"`
-	} `mapstructure:",squash"`
-
-	OpenSearch struct {
-		// URL is the OpenSearch endpoint URL
-		URL string `mapstructure:"opensearch-url" envconfig:"OPENSEARCH_URL"`
-		// Username for OpenSearch authentication
-		Username string `mapstructure:"opensearch-username" envconfig:"OPENSEARCH_USERNAME"`
-		// Password for OpenSearch authentication
-		Password string `mapstructure:"opensearch-password" envconfig:"OPENSEARCH_PASSWORD"`
-		// IndexNamePrefix is a static prefix for all operator-managed index names and aliases.
-		IndexNamePrefix string `mapstructure:"opensearch-index-name-prefix" envconfig:"default=pm-orgs"`
-		// SemanticModelID is the OpenSearch ML model ID used for semantic field mappings.
-		SemanticModelID string `mapstructure:"opensearch-semantic-model-id" envconfig:"optional,OPENSEARCH_SEMANTIC_MODEL_ID"`
-	} `mapstructure:",squash"`
+type OperatorConfig struct {
+	KCPKubeconfig              string
+	APIExportEndpointSliceName string
+	SearchableResources        []GroupVersionKindProvider
+	OpenSearchIndexNamePrefix  string
+	OpenSearchSemanticModelID  string
 }
 
-func (c Config) InitializerName() string {
-	return "search"
+func NewOperatorConfig() OperatorConfig {
+	return OperatorConfig{
+		KCPKubeconfig:              "/api-kubeconfig/kubeconfig",
+		APIExportEndpointSliceName: "search.platform-mesh.io",
+		OpenSearchIndexNamePrefix:  "pm-orgs",
+	}
 }
 
-// NewFromEnv creates a Config from environment values
-func NewFromEnv() (*Config, error) {
-	appConfig := Config{}
-	err := envconfig.Init(&appConfig)
-	return &appConfig, err
+func (c *OperatorConfig) AddFlags(fs *pflag.FlagSet) {
+	fs.StringVar(&c.KCPKubeconfig, "kcp-kubeconfig", c.KCPKubeconfig, "Path to the kcp kubeconfig file")
+	fs.StringVar(&c.APIExportEndpointSliceName, "api-export-endpoint-slice-name", c.APIExportEndpointSliceName, "Name of the APIExportEndpointSlice to use for the multicluster provider")
+	fs.StringVar(&c.OpenSearchIndexNamePrefix, "opensearch-index-name-prefix", c.OpenSearchIndexNamePrefix, "Static prefix for all operator-managed OpenSearch index names and aliases")
+	fs.StringVar(&c.OpenSearchSemanticModelID, "opensearch-semantic-model-id", c.OpenSearchSemanticModelID, "OpenSearch ML model ID used for semantic field mappings (optional)")
 }
