@@ -191,9 +191,7 @@ spec:
                     description: FrontProxy is the kcp front proxy.
                     properties:
                       exposure:
-                        description: |-
-                          Exposure describes how the front proxy is exposed. Front proxies are
-                          public by definition, so exposure is required.
+                        description: Exposure describes how the front proxy is exposed.
                         properties:
                           hostnameTemplate:
                             description: |-
@@ -243,7 +241,6 @@ spec:
                         - name
                         type: object
                     required:
-                    - exposure
                     - name
                     type: object
                   rootShard:
@@ -253,8 +250,8 @@ spec:
                         description: CacheServerRef references a cache server by name.
                         type: string
                       exposure:
-                        description: Exposure describes how the root shard front proxy
-                          endpoint is exposed.
+                        description: Exposure describes how the root shard endpoint
+                          is exposed.
                         properties:
                           hostnameTemplate:
                             description: |-
@@ -306,10 +303,8 @@ spec:
                           server for the root shard.
                         properties:
                           exposure:
-                            description: |-
-                              Exposure describes how the virtual workspaces endpoint is exposed.
-                              Virtual workspaces are public regardless of mode, so exposure is
-                              required.
+                            description: Exposure describes how the virtual workspaces
+                              endpoint is exposed.
                             properties:
                               hostnameTemplate:
                                 description: |-
@@ -362,11 +357,8 @@ spec:
                             required:
                             - name
                             type: object
-                        required:
-                        - exposure
                         type: object
                     required:
-                    - exposure
                     - name
                     - virtualWorkspaces
                     type: object
@@ -383,9 +375,8 @@ spec:
                             Defaults to the sole defined cache server.
                           type: string
                         exposure:
-                          description: |-
-                            Exposure describes how the shard endpoint is exposed. Optional, shards
-                            do not need to be publicly reachable.
+                          description: Exposure describes how the shard endpoint is
+                            exposed.
                           properties:
                             hostnameTemplate:
                               description: |-
@@ -438,10 +429,8 @@ spec:
                             shard group.
                           properties:
                             exposure:
-                              description: |-
-                                Exposure describes how the virtual workspaces endpoint is exposed.
-                                Virtual workspaces are public regardless of mode, so exposure is
-                                required.
+                              description: Exposure describes how the virtual workspaces
+                                endpoint is exposed.
                               properties:
                                 hostnameTemplate:
                                   description: |-
@@ -494,8 +483,6 @@ spec:
                               required:
                               - name
                               type: object
-                          required:
-                          - exposure
                           type: object
                       required:
                       - name

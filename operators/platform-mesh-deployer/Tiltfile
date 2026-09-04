@@ -17,11 +17,10 @@
 # it unconditionally: this component IS the environment's kcp.
 #
 # The deployer's whole job is to build kcp — it compiles a PlatformMesh into
-# RootShard / Shard / FrontProxy admin CRs, which a kcp-operator turns into
-# Deployments. It is the only source of kcp in this environment: anything else
-# writing those CRs would own the same shards, and the operator this needs is the
-# ntnn fork (split config/workload controllers, Compiled* CRDs), which owns the
-# same operator.kcp.io CRDs as the upstream operator.
+# RootShard / Shard / FrontProxy admin CRs and then, running kcp-operator's own
+# controller groups in-process, into Deployments. It is the only source of kcp in
+# this environment: anything else writing those CRs would own the same shards, as
+# would a separately deployed kcp-operator.
 #
 # Shape mirrors test/e2e TestSingleCluster: one cluster acting as its own config
 # plane and workload cluster, addressed over sslip.io so the hostnames kcp
@@ -53,6 +52,7 @@ def deploy_deployer(
         component_binary,
         oidc={},
         platform_mesh_name='dev',
+        front_proxy_mappings=[],
         resource_deps=[]):
     """Deploy the platform-mesh-deployer and a dev PlatformMesh for it to build.
 
@@ -80,6 +80,18 @@ def deploy_deployer(
       component_binary: passed in rather than loaded here, for the same reason as
                     repo_root: the build's ./bin and ./runtime.Dockerfile are
                     relative to contrib/tilt.
+      front_proxy_mappings: paths the front proxy serves in ADDITION to kcp's own,
+                    as [{'path': ..., 'backend': ...}]. Rendered into a
+                    FrontProxyTemplate the PlatformMesh references.
+
+                    This exists for components installed by Helm rather than by an
+                    OCMModule. A module declares its own path with a component
+                    `mapping` and the deployer registers it; a chart cannot, and
+                    not for want of a field — the deployer rebuilds
+                    spec.additionalPathMappings from the template plus every
+                    module and server-side-applies it with ForceOwnership, so
+                    anything a chart wrote there is erased on the next reconcile.
+                    The template is the one seam a non-module component can use.
       resource_deps: prerequisites for the leaf resources (e.g. the namespace).
     """
 
@@ -104,13 +116,46 @@ def deploy_deployer(
         labels=[LABEL],
     )
 
+    # A writable OCI registry, so a module component can be built from this
+    # checkout and resolved by the deployer without leaving the machine.
+    #
+    # Without it the only component an OCMModule can name is a PUBLISHED one, and
+    # every change to a payload — the chart, values.module*.yaml — is invisible
+    # until it is released. The gap does not announce itself: the deployer happily
+    # applies the last published payload, so a fix that is in the working tree and
+    # a fix that is deployed look identical from the cluster.
+    #
+    # Plain HTTP, reached at registry.<namespace>.svc:5000 in-cluster and on the
+    # node's :30500 from the host. The deployer's resolver takes an http:// URL
+    # and turns off TLS for it (pkg/ocm.ParseRepositoryURL); the node never pulls
+    # from here, because a locally built IMAGE is side-loaded with `kind load`
+    # under a tag no registry serves — see `task dev-module`.
+    # The namespace is stamped here rather than in the base, which carries none
+    # because e2e applies it into a namespace of its own choosing. Without this
+    # the objects land in `default`, and the failure is not where you would look:
+    # the NodePort still accepts a push, because a NodePort belongs to no
+    # namespace, so publishing a component SUCCEEDS and only the deployer fails —
+    # resolving registry.<namespace>.svc, which now names a Service that is not
+    # there.
+    _registry = []
+    for o in decode_yaml_stream(kustomize(cfg('bases', 'registry'))):
+        o['metadata']['namespace'] = namespace
+        _registry.append(o)
+    k8s_yaml(encode_yaml_stream(_registry))
+    k8s_resource(
+        'registry',
+        new_name='deployer-registry',
+        labels=[LABEL],
+        resource_deps=resource_deps,
+    )
+
     # The `eg` gateway the PlatformMesh's ingress stack attaches to, plus the
     # NodePort that makes it reachable at the sslip.io addresses.
     #
-    # The environment's ONLY gateway: dex and the tenancy virtual workspace hang
-    # their TLSRoutes off it too. It has no `hostnames` restriction, which is what
-    # lets one listener carry `fp.<id>.sslip.io`, `idp.<id>.sslip.io` and
-    # `tenancy.<id>.sslip.io` at once — a listener and a route whose hostnames do
+    # The environment's ONLY gateway: dex hangs its TLSRoute off it too, as does
+    # anything else that needs one. It has no `hostnames` restriction, which is
+    # what lets one listener carry `fp.<id>.sslip.io`, `idp.<id>.sslip.io` and
+    # whatever else appears at once — a listener and a route whose hostnames do
     # not intersect simply never attach, with no error on either object.
     k8s_yaml(cfg('bases', 'envoy-gateway', 'gateway.yaml'))
     k8s_resource(
@@ -146,20 +191,18 @@ kubectl -n kube-system rollout status deployment/coredns --timeout=180s''',
         allow_parallel=True,
     )
 
-    # kcp-operator — the ntnn FORK, not upstream.
+    # kcp-operator's CRDs, without kcp-operator.
     #
-    # The deployer emits admin CRs and expects something to compile them into
-    # Compiled* CRs and then into workloads; upstream has neither the split
-    # controllers nor those CRDs. This is the same base test/e2e uses for the
-    # single-cluster case (`default` = both controller groups in one process),
-    # and the same fork the module pins via the `replace` in go.mod — bump the two
-    # together or the deployer writes CRs the operator cannot read.
+    # The deployer runs both of kcp-operator's controller groups in its own
+    # process, so there is no operator Deployment to install them — but the
+    # deployer still writes operator.kcp.io admin CRs and reconciles the
+    # deploy.operator.kcp.io compiled ones, so the schemas have to be here.
     #
     # kubectl -k, not Tilt's kustomize(): the base is a remote GitHub URL and the
     # builtin does not fetch those.
     local_resource(
-        'kcp-operator',
-        cmd='kubectl apply --server-side --force-conflicts -k ' + cfg('bases', 'kcp-operator', 'default'),
+        'kcp-operator-crds',
+        cmd='kubectl apply --server-side --force-conflicts -k ' + cfg('bases', 'kcp-operator', 'crds'),
         labels=[LABEL],
         allow_parallel=True,
     )
@@ -309,7 +352,7 @@ spec:
             'platform-mesh-deployer-manager-role:clusterrole',
             'platform-mesh-deployer-manager-rolebinding:clusterrolebinding',
         ],
-        resource_deps=resource_deps + ['kcp-operator', 'deployer-crds'],
+        resource_deps=resource_deps + ['kcp-operator-crds', 'deployer-crds'],
         labels=[LABEL],
     )
 
@@ -390,7 +433,7 @@ kubectl -n "$NS" create secret generic "$SECRET" \\
     #
     # Without it kcp has no external authenticator at all: the only identities
     # are the operator's own certificates, so every human is anonymous and every
-    # tenancy binding names a subject that can never authenticate.
+    # RBAC binding for a person names a subject that can never authenticate.
     _oidc_block = ''
     if oidc.get('issuerURL') and oidc.get('clientID'):
         _oidc_block = '\n'.join([
@@ -402,27 +445,67 @@ kubectl -n "$NS" create secret generic "$SECRET" \\
             '      usernamePrefix: "' + oidc.get('usernamePrefix', '') + '"',
             '      groupsClaim: ' + oidc.get('groupsClaim', 'groups'),
             # Rendered ALWAYS, and never allowed to fall through to kcp's own
-            # default, which is `oidc:` rather than empty. The tenancy VW mirrors
-            # this pair to decide what a caller's groups are called; a prefix that
-            # only one of them applies splits every group in two and admits the
-            # holder on one plane while denying them on the other.
+            # default, which is `oidc:` rather than empty. Anything writing RBAC
+            # for an IdP group mirrors this pair to decide what a caller's groups
+            # are called; a prefix that only one side applies splits every group
+            # in two and admits the holder on one plane while denying them on the
+            # other.
             '      groupsPrefix: "' + oidc.get('groupsPrefix', '') + '"',
             '      caFileRef:',
             '        name: ' + oidc.get('caFileRef', {}).get('name', 'dex-ca'),
             '        key: ' + oidc.get('caFileRef', {}).get('key', 'ca.crt'),
         ])
 
+    # A FrontProxyTemplate, only when something asked for a path on the front
+    # proxy. Rendered here rather than by the caller because the PlatformMesh has
+    # to reference it, and the two would otherwise be edited in two files.
+    #
+    # The three certificate paths are the front proxy's own mounts, and are the
+    # same values the deployer writes for a module's mapping (frontproxy.go). A
+    # mapping without them is served without client identity, so the backend sees
+    # every caller as anonymous.
+    _fp_template = ''
+    _fp_template_ref = ''
+    if front_proxy_mappings:
+        _entries = ''.join([('''
+    - path: {path}
+      backend: {backend}
+      backend_server_ca: /etc/kcp/tls/ca/tls.crt
+      proxy_client_cert: /etc/kcp-front-proxy/requestheader-client/tls.crt
+      proxy_client_key: /etc/kcp-front-proxy/requestheader-client/tls.key''').format(**m)
+            for m in front_proxy_mappings])
+        _fp_template = '''apiVersion: deploy.platform-mesh.io/v1alpha1
+kind: FrontProxyTemplate
+metadata:
+  name: fp
+  namespace: {ns}
+spec:
+  additionalPathMappings:{entries}
+---
+'''.format(ns=namespace, entries=_entries)
+        _fp_template_ref = '''
+      templateRef:
+        name: fp'''
+
     # A dev PlatformMesh and the two topology templates it references, mirroring
     # test/e2e's fixture. The quoting is not a typo: hostnameTemplate, the etcd
     # endpoints and the etcd prefix are CEL EXPRESSIONS, so a literal string has
     # to appear as a quoted string inside the YAML string. `platformMesh`,
     # `component` and `cluster` are the variables the deployer binds per shard.
-    k8s_yaml(blob('''apiVersion: deploy.platform-mesh.io/v1alpha1
+    #
+    # `external`, `cache` and `rootShard` are placeholders. A template carries the
+    # same spec type as the object it is merged onto, so the schema requires them,
+    # but the deployer overwrites all three from the clusters it engaged.
+    k8s_yaml(blob(_fp_template + '''apiVersion: deploy.platform-mesh.io/v1alpha1
 kind: RootShardTemplate
 metadata:
   name: root
   namespace: {ns}
 spec:
+  external:
+    hostname: overwritten
+    port: 1
+  cache: {{}}
   etcd:
     endpoints:
       - '"https://etcd.{cluster}.sslip.io:{port}"'
@@ -443,6 +526,9 @@ metadata:
   name: default
   namespace: {ns}
 spec:
+  rootShard:
+    reference:
+      name: overwritten
   etcd:
     endpoints:
       - '"https://etcd.{cluster}.sslip.io:{port}"'
@@ -494,11 +580,12 @@ spec:
             hostnameTemplate: '"vw." + component + "." + cluster + ".sslip.io"'
             port: {port}
     frontProxy:
-      name: fp
+      name: fp{fp_ref}
       exposure:
         hostnameTemplate: '"fp." + cluster + ".sslip.io"'
         port: {port}
-'''.format(ns=namespace, pm=platform_mesh_name, cluster=cluster_id, port=gateway_nodeport, oidc=_oidc_block)))
+'''.format(ns=namespace, pm=platform_mesh_name, cluster=cluster_id, port=gateway_nodeport,
+           oidc=_oidc_block, fp_ref=_fp_template_ref)))
 
     k8s_resource(
         new_name='platformmesh',
@@ -506,7 +593,7 @@ spec:
             '{}:platformmesh'.format(platform_mesh_name),
             'root:rootshardtemplate',
             'default:shardtemplate',
-        ],
+        ] + (['fp:frontproxytemplate'] if front_proxy_mappings else []),
         # Everything the reconcile touches on its first pass. The engage Secret
         # especially: without it the deployer has no cluster to place shards on
         # and the PlatformMesh sits unreconciled with no error to point at.

@@ -56,7 +56,6 @@ vars:
     - resource-broker
     - search-operator
     - security-operator
-    - tenancy-operator
     - terminal-controller-manager
 
     # services
@@ -132,6 +131,13 @@ tasks:
         # --skip args from hack/boilerplate/skip.txt, ignoring blank lines and '#' comment lines.
         skip_args=$(grep -vE '^[[:space:]]*(#|$)' hack/boilerplate/skip.txt | sed 's/^/--skip /' | tr '\n' ' ')
         ./hack/verify_boilerplate.py --boilerplate-dir hack/boilerplate/ $skip_args
+  boilerplate-fix:
+    desc: Prepends the boilerplate comment to source files that are missing it.
+    cmds:
+      - |
+        # --skip args from hack/boilerplate/skip.txt, ignoring blank lines and '#' comment lines.
+        skip_args=$(grep -vE '^[[:space:]]*(#|$)' hack/boilerplate/skip.txt | sed 's/^/--skip /' | tr '\n' ' ')
+        ./hack/fix_boilerplate.py --boilerplate-dir hack/boilerplate/ $skip_args
   test:
     desc: Run unit tests for every component.
     cmds:
@@ -163,39 +169,6 @@ tasks:
           VERSION: '{{.VERSION}}'
           PUSH: '{{.PUSH}}'
           PLATFORMS: '{{.PLATFORMS}}'
-
-  # ---------------------------------------------------------------------------
-  # Local developer flow for the tenancy profile. Thin aliases: the real tasks
-  # live with the component, in operators/tenancy-operator/Taskfile.yaml.
-  # ---------------------------------------------------------------------------
-  dev-login:
-    desc: 'Sign in against the dev IdP (tenancy profile). Credentials: dex@pm.localhost / dex'
-    cmds:
-      - task --dir operators/tenancy-operator dev-login
-  dev-provision:
-    desc: 'Provision the caller''s User (the explicit `create users` of RFC 010 §Part 0).'
-    cmds:
-      - task --dir operators/tenancy-operator dev-provision
-  dev-orgs:
-    desc: List the organizations you belong to.
-    cmds:
-      - task --dir operators/tenancy-operator dev-orgs
-  dev-accounts:
-    desc: 'List the accounts you can work in (ORGANIZATION=<uuid|name> to narrow).'
-    cmds:
-      - task --dir operators/tenancy-operator dev-accounts ORGANIZATION={{.ORGANIZATION}}
-  dev-whoami:
-    desc: Show the identity in the cached token.
-    cmds:
-      - task --dir operators/tenancy-operator dev-whoami
-  dev-grant-group:
-    desc: 'Grant an IdP group access to a tenant (TENANT=<uuid|name> [GROUP=<g>] [ROLE=<role>]).'
-    cmds:
-      - task --dir operators/tenancy-operator dev-grant-group TENANT={{.TENANT}} GROUP={{.GROUP}} ROLE={{.ROLE}}
-  dev-kubeconfig:
-    desc: 'Write a kubeconfig for one workspace (CLUSTER=<id> task dev-kubeconfig).'
-    cmds:
-      - task --dir operators/tenancy-operator dev-kubeconfig CLUSTER={{.CLUSTER}} OUTPUT={{.OUTPUT}}
 
   # ---------------------------------------------------------------------------
   # Per-component targets. Each delegates to the component's own Taskfile.
@@ -259,8 +232,7 @@ tasks:
     cmds:
       - task: lint-{{index .MATCH 0}}
       - task: tidy-check-{{index .MATCH 0}}
-      # TODO: Currently lots of files do not have the correct boilerplate.
-      # - task: boilerplate-{{index .MATCH 0}}
+      - task: boilerplate-{{index .MATCH 0}}
   "images-*":
     desc: "Build (and optionally push) one component's image (e.g. task images-account-operator VERSION=v0.1.0 PUSH=true)."
     vars:

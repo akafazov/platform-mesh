@@ -18,9 +18,9 @@
 #
 # kcp is BUILT, not installed. The base environment runs platform-mesh-deployer
 # and gives it a PlatformMesh; the deployer compiles that into the kcp-operator
-# admin CRs, and kcp appears. There is no static install and no `deployer`
-# profile — the deployer IS the infrastructure, so every profile sits on the kcp
-# it produced.
+# admin CRs and reconciles them itself, and kcp appears. There is no static
+# install and no `deployer` profile — the deployer IS the infrastructure, so
+# every profile sits on the kcp it produced.
 #
 # Quick start:
 #   kind create cluster --name platform-mesh
@@ -33,25 +33,24 @@
 # config
 # ---------------------------------------------------------------------------
 
-# Profiles map onto RFC 008 shapes (see ADR). `infra` builds kcp;
-# `tenancy` adds the RFC 010 tenancy tree and its operator on top of it.
+# Profiles map onto RFC 008 shapes (see ADR). `infra` builds kcp; the others add
+# feature layers on top of it.
 #
 # Profiles COMPOSE: they are independent feature layers, not an ordered ladder, so
 # several can be requested at once and each one only ever adds resources.
 #
-#   --profile=core,tenancy      (or --profile=core --profile=tenancy)
+#   --profile=core,auth         (or --profile=core --profile=auth)
 #   --profile=full              shorthand for every profile below
 #
 # `infra` is always on — the base environment (namespace, issuer, gateway, etcd,
 # dex, the deployer and the kcp it builds) is unconditional — so naming it is
 # allowed but redundant.
-PROFILES_ALL = ['infra', 'core', 'auth', 'tenancy']
+PROFILES_ALL = ['infra', 'core', 'auth']
 config.define_string_list('profile', args=False, usage='comma-separated: {}|full (default: infra)'.format('|'.join(PROFILES_ALL)))
-config.define_string_list('components', args=True, usage='monorepo components to hot-reload')
 cfg = config.parse()
 
 # Tilt's string_list accumulates repeated flags but does NOT split on commas, so
-# do it here — both spellings above then work, and `--profile=core,tenancy` is the
+# do it here — both spellings above then work, and `--profile=core,auth` is the
 # one people reach for first.
 PROFILES = []
 for _arg in cfg.get('profile', ['infra']):
@@ -70,19 +69,17 @@ def profile(name):
     """True when `name` was requested (directly or via `full`)."""
     return name in PROFILES
 
-COMPONENTS = cfg.get('components', [])
-
 NAMESPACE = 'platform-mesh-system'
 
 # ADDRESSING — every hostname in this environment is `<name>.<CLUSTER_ID>.sslip.io`
 # reached on GATEWAY_NODEPORT.
 #
-# One scheme, because a kcp hostname has to resolve to the SAME address from four
-# places: the host, the kcp shards, anything following an APIExportEndpointSlice
-# URL (which is dialed verbatim and cannot be rewritten by a kubeconfig), and the
-# tenancy virtual workspace. sslip.io resolves `root.192-168-0-2.sslip.io` to
-# 192.168.0.2 for all of them, so there are NO hostAliases anywhere in this
-# environment and no "advertised but not routed" gateway address to reconcile.
+# One scheme, because a kcp hostname has to resolve to the SAME address from
+# three places: the host, the kcp shards, and anything following an
+# APIExportEndpointSlice URL (which is dialed verbatim and cannot be rewritten by
+# a kubeconfig). sslip.io resolves `root.192-168-0-2.sslip.io` to 192.168.0.2 for
+# all of them, so there are NO hostAliases anywhere in this environment and no
+# "advertised but not routed" gateway address to reconcile.
 #
 # It must be the NodePort and not the gateway's own listener port: sslip.io
 # resolves to the node, and nothing listens on node:8443.
@@ -100,13 +97,12 @@ def sslip(name):
     """`<name>.<cluster>.sslip.io` — the one way anything is addressed here."""
     return '{}.{}.sslip.io'.format(name, CLUSTER_ID)
 
-# The OIDC settings, defined ONCE and read twice — by kcp's authenticator and by
-# the tenancy virtual workspace's own verifier (RFC 010 §1.1).
+# The OIDC settings, defined ONCE and read by both kcp's authenticator (through
+# the RootShardTemplate's spec.auth.oidc) and dex's own configuration.
 #
-# The VW resolves a caller to a User before kcp is ever involved, so it verifies
-# tokens itself. If these two readers drift, a token kcp accepts is rejected by the
-# VW — or worse, resolved to a different identity than the one kcp will enforce
-# RBAC against. One dict is the enforcement.
+# One dict is the enforcement: dex issues the tokens kcp verifies, so an issuer
+# URL, client ID or claim mapping that drifts between the two is a token kcp
+# rejects for reasons nothing useful logs.
 KCP_OIDC = {
     'issuerURL': 'https://{}:{}'.format(sslip('idp'), GATEWAY_NODEPORT),
     'clientID': 'platform-mesh',
@@ -120,11 +116,10 @@ KCP_OIDC = {
     # system:. A prefix keeps them apart and makes an RBAC subject say where the
     # identity came from.
     #
-    # The tenancy operator MIRRORS this to build User.spec.rbacIdentity, which
-    # every ClusterRoleBinding names. If the two disagree, every binding names a
-    # subject that never authenticates and the user is 403'd in a workspace they
-    # own — with a Membership and a binding that both look correct. Keeping the
-    # prefix here rather than in the chart is what stops that drift.
+    # Anything writing RBAC for an OIDC user has to MIRROR this: a binding whose
+    # subject omits the prefix names an identity that never authenticates, and the
+    # user is 403'd by a binding that looks correct. Keeping the prefix here rather
+    # than in each component's chart is what stops that drift.
     'usernamePrefix': 'pm:',
     # Set for the same reason usernamePrefix is, plus one that is sharper for
     # groups: an unprefixed group claim puts whatever the IdP says straight into
@@ -133,7 +128,7 @@ KCP_OIDC = {
     #
     # It must be written down rather than left out: kcp defaults an unset
     # groupsPrefix to `oidc:`, so omitting it here would not mean "no prefix", it
-    # would mean "a prefix the tenancy VW was never told about".
+    # would mean "a prefix nothing else in the environment was told about".
     'groupsPrefix': 'pm:',
     'caFileRef': {'name': 'dex-ca', 'key': 'ca.crt'},
 }
@@ -147,12 +142,12 @@ KCP_OIDC = {
 # the hostAliases and the "which of the two mechanisms covers this traffic?"
 # question all go away.
 
-# Skip remote-fetch infra (cert-manager, envoy gateway, kcp-operator) so the
-# Tiltfile evaluates offline — used for manifest validation. Local manifests and
-# the kcp CRs still render.
+# Skip remote-fetch infra (cert-manager, envoy gateway, the kcp-operator CRDs) so
+# the Tiltfile evaluates offline — used for manifest validation. Local manifests
+# and the kcp CRs still render.
 NO_INFRA = os.getenv('TILT_NO_INFRA', '') not in ('', '0', 'false', 'no')
 
-print('Platform Mesh dev env — profiles={} components={} no_infra={}'.format(','.join(PROFILES), COMPONENTS, NO_INFRA))
+print('Platform Mesh dev env — profiles={} no_infra={}'.format(','.join(PROFILES), NO_INFRA))
 
 # ---------------------------------------------------------------------------
 # context guard
@@ -210,22 +205,34 @@ k8s_resource(
     resource_deps=['namespace'],
 )
 
-# The tenancy virtual workspace's external name — one more SNI name on the same
-# `eg` gateway kcp and dex use.
-TENANCY_VW_HOSTNAME = sslip('tenancy')
+# Every front-proxy path this environment claims, accumulated per profile.
+#
+# Built here, above the deployer, because the FrontProxyTemplate is rendered with
+# the PlatformMesh — the front proxy is compiled from it, and a profile enabled
+# further down cannot add a path afterwards. A component installed by Helm (as
+# opposed to by an OCMModule, which declares its own `mapping`) appends an entry
+# here as {'path': ..., 'backend': ...}; a chart cannot register the path itself,
+# because the deployer owns spec.additionalPathMappings and applies it with
+# ForceOwnership.
+#
+# Append, do not reassign: a second profile wanting a path adds a line, and the
+# deployer settles precedence and collisions over these AND every module's
+# mapping together (mergePathMappings). Two owners claiming one path is an error
+# there rather than a route that silently shadows another.
+FRONT_PROXY_MAPPINGS = []
 
 # The gateway is NOT defined here. The single `eg` gateway comes from the
 # deployer's config/bases/envoy-gateway, together with the NodePort that makes
-# the sslip.io names reachable. One gateway on purpose: kcp, dex and the tenancy
-# virtual workspace all hang TLSRoutes off the same listener, and a second one
-# only meant a second place for a route to silently fail to attach.
+# the sslip.io names reachable. One gateway on purpose: kcp and dex hang
+# TLSRoutes off the same listener, and a second one only meant a second place for
+# a route to silently fail to attach.
 
 # NO PLAINTEXT etcd HERE ANY MORE either. The deployer brings a mutual-TLS etcd
 # reachable through the gateway, because a shard it places on another cluster
 # resolves the endpoint verbatim and a .svc name means nothing there.
 
 # Dex — the OIDC issuer kcp authenticates against (RootShard spec.auth.oidc).
-# kcp always needs an issuer wired, and the kcp-operator won't create the shard
+# kcp always needs an issuer wired, and the deployer won't create the shard
 # Deployment until the referenced CA secret (dex-ca) exists, so Dex ships in the
 # base environment. Terminates its own TLS and is routed by SNI through the
 # passthrough gateway; the cert chain publishes `dex-ca`.
@@ -251,9 +258,8 @@ k8s_resource(
 
 # Remote-fetch infra (cert-manager, envoy gateway controller, Flux, OCM).
 #
-# The kcp-operator is NOT here: the deployer installs the ntnn fork it needs
-# (split config/workload controllers plus the Compiled* CRDs its admin CRs
-# compile into), which owns the same operator.kcp.io CRDs as upstream.
+# No kcp-operator here, and none anywhere: the deployer runs its controller
+# groups in its own process and installs only its CRDs.
 if not NO_INFRA:
     include('./infra_remote.Tiltfile')
 
@@ -265,15 +271,15 @@ if not NO_INFRA:
 # Tiltfile, next to the kustomizations it deploys. This file only supplies what
 # is environment-wide.
 #
-# This is the base environment, not an option: the deployer, the ntnn
-# kcp-operator fork it needs, a mutual-TLS etcd, the `eg` gateway, the CoreDNS
-# sslip.io answers, and a PlatformMesh for it to compile into kcp. Everything
-# else in this file sits on the kcp that comes out.
+# This is the base environment, not an option: the deployer, the kcp-operator
+# CRDs it reconciles, a mutual-TLS etcd, the `eg` gateway, the CoreDNS sslip.io
+# answers, and a PlatformMesh for it to compile into kcp. Everything else in
+# this file sits on the kcp that comes out.
 #
 # There is exactly one way to get a kcp here, on purpose. A second one would
 # have to own the same shards and the same operator.kcp.io CRDs, and every
 # component would then have to work against both.
-load('./helpers.py', 'component_build', 'component_binary', 'chart_path')
+load('./helpers.py', 'component_build', 'component_binary')
 
 deploy_deployer = load_dynamic('../../operators/platform-mesh-deployer/Tiltfile')['deploy_deployer']
 deploy_deployer(
@@ -282,115 +288,26 @@ deploy_deployer(
     # admin CRs into. Must equal the operator's --provider-namespace (its
     # default) and the namespace config/dev pins onto the etcd base.
     namespace=NAMESPACE,
-    # Shared with dex and the tenancy VW so every hostname in the environment
-    # resolves the same way (see ADDRESSING above).
+    # Shared with dex so every hostname in the environment resolves the same way
+    # (see ADDRESSING above).
     cluster_id=CLUSTER_ID,
     gateway_nodeport=GATEWAY_NODEPORT,
-    # The SAME dict dex is configured from and the tenancy VW verifies against.
-    # The shards check tokens against this issuer URL, so a literal here instead
-    # of the shared value is a token kcp rejects for reasons nothing logs.
+    # The SAME dict dex is configured from. The shards check tokens against this
+    # issuer URL, so a literal here instead of the shared value is a token kcp
+    # rejects for reasons nothing logs.
     oidc=KCP_OIDC,
     # The installation's name. It prefixes the engage Secret
     # (`<name>--<clusterID>`) and every generated shard, so changing it renames
     # the whole tree rather than adding a second one.
     platform_mesh_name=os.getenv('PLATFORM_MESH_NAME', 'dev'),
+    # Paths on the front proxy for components this environment installs by Helm,
+    # accumulated above. Declared with the PlatformMesh because the front proxy is
+    # compiled from it — the mapping has to exist before the backing Service does,
+    # and a path pointing at an absent backend is a 503 on that path alone rather
+    # than a broken proxy.
+    front_proxy_mappings=FRONT_PROXY_MAPPINGS,
     # Passed in so the build's relative paths keep resolving against this
     # directory rather than the component's.
     component_binary=component_binary,
     resource_deps=['namespace'],
 )
-
-
-# ---------------------------------------------------------------------------
-# component hot-reload (stub — off by default in the skeleton)
-# ---------------------------------------------------------------------------
-
-if COMPONENTS:
-    OCI = 'oci://ghcr.io/platform-mesh/helm-charts'
-    # Example wiring for the pilot component. Real deps/versions land with Phase 1.
-    if 'account-operator' in COMPONENTS:
-        # Pin a published chart version (the placeholder 0.0.0 was never pushed).
-        # Override with ACCOUNT_OPERATOR_CHART_VERSION to track a newer chart, or
-        # set HELM_CHARTS_DIR to a local helm-charts checkout to render the chart
-        # from source (see chart_path in helpers.py) — then this version is ignored.
-        component_build(
-            name='account-operator',
-            path='operators/account-operator',
-            deps=['apis', 'subroutines', 'golang-commons'],
-            # Match the image ref the chart renders so Tilt substitutes the
-            # locally-built image (it swaps by repository, keeping the chart's args).
-            image='ghcr.io/platform-mesh/platform-mesh/account-operator',
-            chart=chart_path('account-operator', os.getenv('ACCOUNT_OPERATOR_CHART_VERSION', '0.17.0'), OCI),
-            namespace=NAMESPACE,
-            # Skip the account-operator-crds subchart: it emits kcp APIExport/
-            # APIResourceSchema/APIExportEndpointSlice objects whose CRDs live in
-            # kcp workspaces, not the runtime kube cluster. Applying them here
-            # fails and drops the webhook cert with it, wedging the pod in
-            # ContainerCreating. The kcp API registration is wired separately.
-            helm_set=['crds.enabled=false'],
-            # Wait for the namespace so a fresh cluster doesn't race "namespace not found".
-            resource_deps=['namespace'],
-            # Fold the chart's non-workload objects into this resource (else Tilt's
-            # dependency-less "uncategorized" catch-all applies them before the
-            # namespace exists). The cluster-scoped ClusterRole/Binding are included
-            # for tidy grouping; the namespaced ones are what actually need the dep.
-            objects=[
-                'account-operator:serviceaccount',
-                'account-operator:clusterrole',
-                'account-operator:clusterrolebinding',
-                'account-operator-ca-cert:certificate',
-                'account-operator-serving-cert:certificate',
-                'account-operator-selfsigned-issuer:issuer',
-                'account-operator-ca-issuer:issuer',
-            ],
-        )
-
-# ---------------------------------------------------------------------------
-# tenancy (RFC 010) — the Organization/Workspace tenancy model
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-#
-# The wiring lives with the component, at operators/tenancy-operator/Tiltfile,
-# next to the chart and the bootstrap manifests it deploys. This file only decides
-# WHETHER to deploy it and supplies the values that are environment-wide.
-#
-# load_dynamic rather than load(): load() must be top-level, and this is
-# conditional on the profile.
-if profile('tenancy'):
-    # The install root, defined ONCE here and pushed into both the bootstrap and
-    # the operator's flags. RFC 010 makes every path configuration precisely so a
-    # sub-tree install is not a code change — but the two sides must then agree, or
-    # the operator watches a tree nobody built. One variable is the enforcement.
-    #
-    # Deliberately not `root`: the platform should not claim kcp's root workspace,
-    # which may already belong to someone else's tree.
-    TENANCY_ROOT = os.getenv('TENANCY_ROOT', 'root:tenancy')
-
-    deploy_tenancy = load_dynamic('../../operators/tenancy-operator/Tiltfile')['deploy_tenancy']
-    deploy_tenancy(
-        repo_root=os.path.abspath('../..'),
-        namespace=NAMESPACE,
-        install_root=TENANCY_ROOT,
-        oidc=KCP_OIDC,
-        # Same `eg` gateway kcp and dex attach to; one more SNI name on it.
-        gateway={
-            'name': 'eg',
-            'namespace': 'envoy-gateway-system',
-            'hostname': TENANCY_VW_HOSTNAME,
-        },
-        # NO hostalias_ip/hostnames/internal_server any more. Under sslip.io the
-        # address kcp publishes in its own kubeconfigs and endpoint slices already
-        # resolves and routes in-cluster, so there is nothing to redirect and
-        # nothing to alias — see ADDRESSING at the top.
-        #
-        # Which kcp to install into is discovered at RUNTIME instead, from the
-        # labels the deployer stamps on what it generates: the front proxy's name
-        # carries a hash and cannot be written down here.
-        platform_mesh_name=os.getenv('PLATFORM_MESH_NAME', 'dev'),
-        # Passed in so the build's relative paths keep resolving against this
-        # directory rather than the component's.
-        component_build=component_build,
-        # kcp has to exist before its tree can be installed: `platformmesh` is
-        # the resource that creates the installation the front proxy comes from.
-        resource_deps=['namespace', 'platformmesh'],
-    )

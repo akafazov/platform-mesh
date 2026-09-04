@@ -187,6 +187,7 @@ func (s *IndexableResourceWatcherSubroutine) Process(ctx context.Context, instan
 		log.Warn().Msg("AccountInfo is missing required account/organization origin metadata, requeuing")
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
+	doc.FilterableFields["account_fga_object"] = buildFGAObjectName(pmcorev1alpha1.GroupName, pmsearchv1alpha1.AccountKind, accountInfo.Spec.Account.OriginClusterId, accountInfo.Spec.Account.Name, "")
 
 	fgaGroup, fgaKind, fgaClusterID := mapResourceToFGAObject(gvk.Group, gvk.Kind, resourceClusterID, accountInfo)
 	doc.FGAObject = buildFGAObjectName(fgaGroup, fgaKind, fgaClusterID.String(), resource.GetName(), resource.GetNamespace())
