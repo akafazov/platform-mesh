@@ -116,7 +116,7 @@ jobs:
   # Integration (envtest) suite: downloads the shared kcp (tools:kcp) and runs
   # the kcp-backed controller tests under internal/controller.
   test-e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-large
     env:
       GOPRIVATE: github.com/platform-mesh
     steps:
@@ -133,6 +133,9 @@ jobs:
           git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure /etc/hosts for local domain resolution
+        run: |
+          echo "127.0.0.1 portal.localhost root.kcp.localhost kcp.api.portal.localhost " | sudo tee -a /etc/hosts
       - uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2.0.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
