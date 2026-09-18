@@ -116,7 +116,7 @@ jobs:
   # Integration (envtest) suite: downloads the shared kcp (tools:kcp) and runs
   # the kcp-backed controller tests under internal/controller.
   test-e2e:
-    runs-on: ubuntu-latest-large
+    runs-on: ubuntu-latest
     env:
       GOPRIVATE: github.com/platform-mesh
     steps:
